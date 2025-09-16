@@ -1,0 +1,272 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"sync"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+)
+
+var (
+	bot               *tgbotapi.BotAPI
+	activeSmoke       bool
+	mu                sync.Mutex
+	userStart         = make(map[int64]bool)
+	smokeStarter      int64
+	smokeMessageID    int64
+	joinedUsers       []string
+	originalSmokeText string
+)
+
+func main() {
+	var err error
+	bot, err = tgbotapi.NewBotAPI("8304451768:AAEyfAUAWL2jNgDQI-MfKVHObe71BBtAJ98")
+	if err != nil {
+		log.Panic(err)
+	}
+
+	bot.Debug = true
+	log.Printf("Authorized on account %s", bot.Self.UserName)
+	setCommands()
+
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 60
+
+	updates := bot.GetUpdatesChan(u)
+
+	for update := range updates {
+		if update.CallbackQuery != nil {
+			handleCallback(update.CallbackQuery)
+			continue
+		}
+
+		if update.Message == nil {
+			continue
+		}
+
+		// Работает только в групповых чатах
+		if !update.Message.Chat.IsGroup() && !update.Message.Chat.IsSuperGroup() {
+			continue
+		}
+
+		//if update.Message.IsCommand() {
+		switch update.Message.Command() {
+		case "start":
+			handleConsent(update.Message)
+		case "smoke":
+			handleSmoke(update.Message)
+		case "cancel":
+			handleEndSmoke(update.Message)
+		case "help":
+			sendMessage(update.Message.Chat.ID,
+				"Поддерживаемые команды:\n\n"+
+					"/start - Присоединиться к банде курителей\n"+
+					"/smoke - Предложить всем перекур\n"+
+					"/cancel - Отменить активный перекур\n"+
+					"/help - Помощь")
+			//case "yes", "no":
+			//	handleResponse(update.Message)
+			//default:
+			//	sendMessage(update.Message.Chat.ID, fmt.Sprintf("@%s, твоя команда не поддерживается, прожми /help", update.Message.From.UserName))
+		}
+		//} else {
+		//	sendMessage(update.Message.Chat.ID, fmt.Sprintf("@%s, бот принимает только команды", update.Message.From.UserName))
+		//}
+
+	}
+}
+
+func handleConsent(message *tgbotapi.Message) {
+	userStart[message.From.ID] = true
+	answer := fmt.Sprintf("✅ @%s теперь с нами!", message.From.UserName)
+	sendMessage(message.Chat.ID, answer)
+}
+
+func handleSmoke(message *tgbotapi.Message) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if activeSmoke {
+		answer := fmt.Sprintf("❌ @%s, уже кто-то предложил перекур!", message.From.UserName)
+		sendMessage(message.Chat.ID, answer)
+		return
+	}
+
+	activeSmoke = true
+	smokeStarter = message.From.ID
+	joinedUsers = []string{}
+
+	// Пользователи, давшие согласие
+	var users []string
+	//for userID := range userStart {
+	for userID, start := range userStart {
+		if start && userID != message.From.ID {
+			user, _ := bot.GetChat(tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{ChatID: userID}})
+			users = append(users, fmt.Sprintf("@%s", user.UserName))
+		}
+	}
+
+	if len(users) == 0 {
+		sendMessage(message.Chat.ID, "❌ Пока никто не добавился ;(")
+		activeSmoke = false
+		return
+	}
+
+	originalSmokeText = fmt.Sprintf("🚬 @%s предлагает перекур! \nПриглашённые джентльмены: %s",
+		message.From.UserName, getUsers(users))
+
+	msg := tgbotapi.NewMessage(message.Chat.ID, originalSmokeText)
+
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Да", "yes"),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Нет", "no"),
+		),
+	)
+	bot.Send(msg)
+	//sendMessage(message.Chat.ID, msg.Text)
+}
+
+func handleCallback(callback *tgbotapi.CallbackQuery) {
+	callbackConfig := tgbotapi.NewCallback(callback.ID, "")
+	bot.Send(callbackConfig)
+
+	if callback.Data == "yes" || callback.Data == "no" {
+		handleButtonResponse(callback)
+	}
+}
+
+func handleButtonResponse(callback *tgbotapi.CallbackQuery) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !activeSmoke {
+		return
+	}
+
+	if callback.Data == "yes" {
+		userName := fmt.Sprintf("@%s", callback.From.UserName)
+
+		for _, user := range joinedUsers {
+			if user == userName {
+				return
+			}
+		}
+
+		joinedUsers = append(joinedUsers, userName)
+
+		// Редактируем сообщение с обновленным списком
+		editMessage(callback.Message.Chat.ID, smokeMessageID)
+	}
+	// Для "no" ничего не делаем
+}
+
+//func handleResponse(message *tgbotapi.Message) {
+//	mu.Lock()
+//	defer mu.Unlock()
+//
+//	if !activeSmoke {
+//		return
+//	}
+//
+//	response := "присоединился к перекуру"
+//	if message.Command() == "no" {
+//		response = "отказался от перекура"
+//	}
+//
+//	answer := fmt.Sprintf("+👤 @%s %s", message.From.UserName, response)
+//	sendMessage(message.Chat.ID, answer)
+//}
+
+func editMessage(chatID int64, messageID int64) {
+	newText := fmt.Sprintf("%s\n\nПрисоединились: %s",
+		originalSmokeText,
+		getUsers(joinedUsers))
+
+	if len(joinedUsers) == 0 {
+		newText += "пока никто"
+	}
+
+	// Редактируем сообщение
+	edit := tgbotapi.NewEditMessageText(chatID, int(messageID), newText)
+	edit.ReplyMarkup = &tgbotapi.InlineKeyboardMarkup{
+		InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
+			{
+				tgbotapi.NewInlineKeyboardButtonData("✅ Да", "yes"),
+				tgbotapi.NewInlineKeyboardButtonData("❌ Нет", "no"),
+			},
+		},
+	}
+	bot.Send(edit)
+}
+
+func handleEndSmoke(message *tgbotapi.Message) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if activeSmoke && message.From.ID == smokeStarter {
+		activeSmoke = false
+		answer := fmt.Sprintf("@%s завершил перекур!", message.From.UserName)
+		sendMessage(message.Chat.ID, answer)
+
+		deleteMsg := tgbotapi.NewDeleteMessage(message.Chat.ID, int(smokeMessageID))
+		bot.Send(deleteMsg)
+	} else if activeSmoke {
+		answer := fmt.Sprintf("@%s, у тебя нет прав!", message.From.UserName)
+		sendMessage(message.Chat.ID, answer)
+	} else {
+		sendMessage(message.Chat.ID, "Нет активного перекура!")
+	}
+}
+
+func getUsers(users []string) string {
+	result := ""
+	for i, user := range users {
+		if i > 0 {
+			result += " "
+		}
+		result += user
+	}
+	return result
+}
+
+func sendMessage(chatID int64, text string) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	bot.Send(msg)
+}
+
+// Регистрация команд бота
+func setCommands() {
+	commands := []tgbotapi.BotCommand{
+		{
+			Command:     "start",
+			Description: "Войти в систему",
+		},
+		{
+			Command:     "smoke",
+			Description: "Предложить перекур",
+		},
+		//{
+		//	Command:     "status",
+		//	Description: "Статус текущего перекура",
+		//},
+		{
+			Command:     "cancel",
+			Description: "Отменить перекур",
+		},
+		{
+			Command:     "help",
+			Description: "Помощь",
+		},
+		//{
+		//	Command:     "stats",
+		//	Description: "Статистика перекуров",
+		//},
+	}
+
+	config := tgbotapi.NewSetMyCommands(commands...)
+	bot.Request(config)
+	//_, err := bot.Request(config)
+	//return err
+}
