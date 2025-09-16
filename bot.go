@@ -3,7 +3,12 @@ package main
 import (
 	"fmt"
 	"log"
+	"smoke-bot/config"
+	"smoke-bot/database/database"
+	"smoke-bot/database/repository"
+	"smoke-bot/logger"
 	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -17,11 +22,31 @@ var (
 	smokeMessageID    int64
 	joinedUsers       []string
 	originalSmokeText string
+	allowedChats      = map[int64]bool{
+		-4845216092: true,
+	}
 )
 
 func main() {
-	var err error
-	bot, err = tgbotapi.NewBotAPI("8304451768:AAEyfAUAWL2jNgDQI-MfKVHObe71BBtAJ98")
+	config := config.DefaultConfig()
+
+	err := logger.Init(config.LogFile)
+	if err != nil {
+		log.Fatalf("Не удалось инициализировать логгер: %v", err)
+	}
+	defer logger.Close()
+
+	// Инициализация базы данных
+	db, err := database.InitSQLite(config.DBPath)
+	if err != nil {
+		logger.Fatal("Ошибка инициализации БД", err)
+	}
+	defer db.Close()
+
+	repo := repository.NewSQLiteRepository(db)
+
+	//var err error
+	bot, err := tgbotapi.NewBotAPI("8304451768:AAEyfAUAWL2jNgDQI-MfKVHObe71BBtAJ98")
 	if err != nil {
 		log.Panic(err)
 	}
@@ -37,11 +62,23 @@ func main() {
 
 	for update := range updates {
 		if update.CallbackQuery != nil {
-			handleCallback(update.CallbackQuery)
+			if isChatAllowed(update.CallbackQuery.Message.Chat.ID) {
+				handleCallback(update.CallbackQuery)
+			}
 			continue
 		}
 
 		if update.Message == nil {
+			continue
+		}
+
+		if !isChatAllowed(update.Message.Chat.ID) {
+			continue
+		}
+
+		if isOldMessage(update.Message) {
+			log.Printf("Пропускаем старое сообщение от %s: %s",
+				update.Message.From.UserName, update.Message.Text)
 			continue
 		}
 
@@ -75,6 +112,22 @@ func main() {
 		//}
 
 	}
+}
+
+func isOldMessage(message *tgbotapi.Message) bool {
+	messageTime := time.Unix(int64(message.Date), 0)
+	botStartTime := time.Now().Add(-5 * time.Minute) // Допускаем небольшую погрешность
+
+	return messageTime.Before(botStartTime)
+}
+
+func isChatAllowed(chatID int64) bool {
+	//if len(allowedChats) == 0 {
+	//	return true
+	//}
+
+	_, exists := allowedChats[chatID]
+	return exists
 }
 
 func handleConsent(message *tgbotapi.Message) {
@@ -124,7 +177,13 @@ func handleSmoke(message *tgbotapi.Message) {
 			tgbotapi.NewInlineKeyboardButtonData("❌ Нет", "no"),
 		),
 	)
-	bot.Send(msg)
+	sentMsg, err := bot.Send(msg)
+	if err != nil {
+		log.Printf("Ошибка отправки сообщения с кнопками: %v", err)
+		activeSmoke = false
+		return
+	}
+	smokeMessageID = int64(sentMsg.MessageID)
 	//sendMessage(message.Chat.ID, msg.Text)
 }
 
@@ -153,7 +212,6 @@ func handleButtonResponse(callback *tgbotapi.CallbackQuery) {
 				return
 			}
 		}
-
 		joinedUsers = append(joinedUsers, userName)
 
 		// Редактируем сообщение с обновленным списком
@@ -161,23 +219,6 @@ func handleButtonResponse(callback *tgbotapi.CallbackQuery) {
 	}
 	// Для "no" ничего не делаем
 }
-
-//func handleResponse(message *tgbotapi.Message) {
-//	mu.Lock()
-//	defer mu.Unlock()
-//
-//	if !activeSmoke {
-//		return
-//	}
-//
-//	response := "присоединился к перекуру"
-//	if message.Command() == "no" {
-//		response = "отказался от перекура"
-//	}
-//
-//	answer := fmt.Sprintf("+👤 @%s %s", message.From.UserName, response)
-//	sendMessage(message.Chat.ID, answer)
-//}
 
 func editMessage(chatID int64, messageID int64) {
 	newText := fmt.Sprintf("%s\n\nПрисоединились: %s",
