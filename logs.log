@@ -1,0 +1,9 @@
+ℹ️ 2025/09/17 19:46:36 Инициализация SQLite: ./data.db
+❌ 2025/09/17 19:46:36 Ошибка открытия БД: sql: unknown driver "sqlite3" (forgotten import?)
+❌ 2025/09/17 19:46:36 Ошибка инициализации БД: sql: unknown driver "sqlite3" (forgotten import?)
+ℹ️ 2025/09/17 19:48:07 Инициализация SQLite: ./data.db
+❌ 2025/09/17 19:48:07 Ошибка открытия БД: sql: unknown driver "sqlite" (forgotten import?)
+❌ 2025/09/17 19:48:07 Ошибка инициализации БД: sql: unknown driver "sqlite" (forgotten import?)
+ℹ️ 2025/09/17 19:55:35 Инициализация SQLite: ./data.db
+❌ 2025/09/17 19:55:35 Ошибка создания таблицы БД: SQL logic error: near ")": syntax error (1)
+❌ 2025/09/17 19:55:35 Ошибка инициализации БД: SQL logic error: near ")": syntax error (1)
