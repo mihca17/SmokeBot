@@ -21,7 +21,7 @@ func InitSQLite(dbPath string) (*SQLiteDB, error) {
 		logger.Info("Инициализация SQLite: " + dbPath)
 
 		// Открываем соединение с SQLite
-		db, err := sql.Open("sqlite3", dbPath)
+		db, err := sql.Open("sqlite", dbPath)
 		if err != nil {
 			sqliteInitError = err
 			logger.Error("Ошибка открытия БД", err)

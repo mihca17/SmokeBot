@@ -4,8 +4,6 @@ import (
 	"database/sql"
 	"smoke-bot/database/models"
 	"sync"
-
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 // SQLiteRepository реализует интерфейс Repository для SQLite
@@ -24,11 +22,11 @@ func NewSQLiteRepository(db *sql.DB) *SQLiteRepository {
 }
 
 // База данных функции
-func (r *SQLiteRepository) SaveUser(user *tgbotapi.User, chatID int64) error {
+func (r *SQLiteRepository) SaveUser(user string, chatID int64) error {
 	_, err := r.db.Exec(`
         INSERT OR REPLACE INTO users (chat_id, username)
         VALUES (?, ?)
-    `, chatID, user.UserName)
+    `, chatID, user)
 	return err
 }
 

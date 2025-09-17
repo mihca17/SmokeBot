@@ -11,13 +11,14 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	_ "modernc.org/sqlite"
 )
 
 var (
-	bot               *tgbotapi.BotAPI
-	activeSmoke       bool
-	mu                sync.Mutex
-	userStart         = make(map[int64]bool)
+	bot         *tgbotapi.BotAPI
+	activeSmoke bool
+	mu          sync.Mutex
+	//userStart         = make(map[int64]bool)
 	smokeStarter      int64
 	smokeMessageID    int64
 	joinedUsers       []string
@@ -43,7 +44,7 @@ func main() {
 	}
 	defer db.Close()
 
-	repo := repository.NewSQLiteRepository(db)
+	repo := repository.NewSQLiteRepository(db.GetDB())
 
 	//var err error
 	bot, err := tgbotapi.NewBotAPI("8304451768:AAEyfAUAWL2jNgDQI-MfKVHObe71BBtAJ98")
@@ -90,9 +91,9 @@ func main() {
 		//if update.Message.IsCommand() {
 		switch update.Message.Command() {
 		case "start":
-			handleConsent(update.Message)
+			handleConsent(update.Message, repo)
 		case "smoke":
-			handleSmoke(update.Message)
+			handleSmoke(update.Message, repo)
 		case "cancel":
 			handleEndSmoke(update.Message)
 		case "help":
@@ -130,13 +131,13 @@ func isChatAllowed(chatID int64) bool {
 	return exists
 }
 
-func handleConsent(message *tgbotapi.Message) {
-	userStart[message.From.ID] = true
+func handleConsent(message *tgbotapi.Message, repo *repository.SQLiteRepository) {
+	repo.SaveUser(message.From.UserName, message.Chat.ID)
 	answer := fmt.Sprintf("✅ @%s теперь с нами!", message.From.UserName)
 	sendMessage(message.Chat.ID, answer)
 }
 
-func handleSmoke(message *tgbotapi.Message) {
+func handleSmoke(message *tgbotapi.Message, repo *repository.SQLiteRepository) {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -148,16 +149,19 @@ func handleSmoke(message *tgbotapi.Message) {
 
 	activeSmoke = true
 	smokeStarter = message.From.ID
-	joinedUsers = []string{}
+	//joinedUsers = []string{}
 
 	// Пользователи, давшие согласие
 	var users []string
-	//for userID := range userStart {
-	for userID, start := range userStart {
-		if start && userID != message.From.ID {
-			user, _ := bot.GetChat(tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{ChatID: userID}})
-			users = append(users, fmt.Sprintf("@%s", user.UserName))
-		}
+
+	allUsers, err := repo.GetAllUsers()
+	if err != nil {
+		logger.Error("Ошибка получения пользователей", err)
+		return
+	}
+
+	for _, user := range allUsers {
+		users = append(users, fmt.Sprintf("@%s", user.Username))
 	}
 
 	if len(users) == 0 {
