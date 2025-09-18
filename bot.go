@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"smoke-bot/config"
@@ -15,10 +16,9 @@ import (
 )
 
 var (
-	bot         *tgbotapi.BotAPI
-	activeSmoke bool
-	mu          sync.Mutex
-	//userStart         = make(map[int64]bool)
+	bot               *tgbotapi.BotAPI
+	activeSmoke       bool
+	mu                sync.Mutex
 	smokeStarter      int64
 	smokeMessageID    int64
 	joinedUsers       []string
@@ -47,7 +47,7 @@ func main() {
 	repo := repository.NewSQLiteRepository(db.GetDB())
 
 	//var err error
-	bot, err := tgbotapi.NewBotAPI("8304451768:AAEyfAUAWL2jNgDQI-MfKVHObe71BBtAJ98")
+	bot, err = tgbotapi.NewBotAPI("8304451768:AAEyfAUAWL2jNgDQI-MfKVHObe71BBtAJ98")
 	if err != nil {
 		log.Panic(err)
 	}
@@ -123,16 +123,25 @@ func isOldMessage(message *tgbotapi.Message) bool {
 }
 
 func isChatAllowed(chatID int64) bool {
-	//if len(allowedChats) == 0 {
-	//	return true
-	//}
-
 	_, exists := allowedChats[chatID]
 	return exists
 }
 
 func handleConsent(message *tgbotapi.Message, repo *repository.SQLiteRepository) {
-	repo.SaveUser(message.From.UserName, message.Chat.ID)
+	user, err := repo.GetByID(message.From.ID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+
+		}
+		logger.Error("Ошибка нахождения пользователя", err)
+		return
+	}
+
+	err := repo.SaveUser(message.From.ID, message.From.UserName, message.Chat.ID)
+	if err != nil {
+		logger.Error("Ошибка сохранения пользователя", err)
+		return
+	}
 	answer := fmt.Sprintf("✅ @%s теперь с нами!", message.From.UserName)
 	sendMessage(message.Chat.ID, answer)
 }

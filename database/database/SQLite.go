@@ -52,9 +52,9 @@ func InitSQLite(dbPath string) (*SQLiteDB, error) {
 func createTables(db *sql.DB) error {
 	_, err := db.Exec(`
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER PRIMARY KEY,
             chat_id INTEGER UNIQUE NOT NULL,
-            username TEXT,
+            username TEXT
         )
     `)
 	if err != nil {

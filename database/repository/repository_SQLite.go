@@ -2,6 +2,7 @@ package repository
 
 import (
 	"database/sql"
+	"fmt"
 	"smoke-bot/database/models"
 	"sync"
 )
@@ -22,17 +23,17 @@ func NewSQLiteRepository(db *sql.DB) *SQLiteRepository {
 }
 
 // База данных функции
-func (r *SQLiteRepository) SaveUser(user string, chatID int64) error {
+func (r *SQLiteRepository) SaveUser(user_id int64, user string, chatID int64) error {
 	_, err := r.db.Exec(`
-        INSERT OR REPLACE INTO users (chat_id, username)
-        VALUES (?, ?)
-    `, chatID, user)
+        INSERT OR REPLACE INTO users (user_id, chat_id, username)
+        VALUES (?, ?, ?)
+    `, user_id, chatID, user)
 	return err
 }
 
 func (r *SQLiteRepository) GetAllUsers() ([]models.User, error) {
 	rows, err := r.db.Query(`
-        SELECT id, chat_id, username
+        SELECT user_id, chat_id, username
         FROM users WHERE chat_id != 0
     `)
 	if err != nil {
@@ -44,7 +45,7 @@ func (r *SQLiteRepository) GetAllUsers() ([]models.User, error) {
 	for rows.Next() {
 		var user models.User
 
-		err := rows.Scan(&user.ID, &user.ChatID, &user.Username)
+		err := rows.Scan(&user.UserID, &user.ChatID, &user.Username)
 		if err != nil {
 			return nil, err
 		}
@@ -53,4 +54,22 @@ func (r *SQLiteRepository) GetAllUsers() ([]models.User, error) {
 	}
 
 	return users, nil
+}
+
+func (r *SQLiteRepository) GetByID(ID int64) (*models.User, error) {
+	var user models.User
+
+	err := r.db.QueryRow(`
+        SELECT user_id, chat_id, username
+        FROM users WHERE user_id = ?
+    `, ID).Scan(&user.UserID, &user.ChatID, &user.Username)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, err
+		}
+		return nil, fmt.Errorf("ошибка получения пользователя: %v", err)
+	}
+
+	return &user, nil
 }
