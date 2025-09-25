@@ -3,7 +3,7 @@ package repository
 import (
 	"database/sql"
 	"fmt"
-	"smoke-bot/database/models"
+	"smoke-bot/models"
 	"sync"
 )
 
@@ -72,4 +72,22 @@ func (r *SQLiteRepository) GetByID(ID int64) (*models.User, error) {
 	}
 
 	return &user, nil
+}
+
+func (r *SQLiteRepository) DeleteByID(ID int64) error {
+	result, err := r.db.Exec("DELETE FROM users WHERE user_id = ?", ID)
+	if err != nil {
+		return fmt.Errorf("ошибка удаления пользователя: %v", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("ошибка получения количества удаленных строк: %v", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("пользователь с ID %d не найден", ID)
+	}
+
+	return nil
 }

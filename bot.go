@@ -4,10 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"smoke-bot/config"
-	"smoke-bot/database/database"
 	"smoke-bot/database/repository"
 	"smoke-bot/logger"
+	"smoke-bot/models"
 	"sync"
 	"time"
 
@@ -15,105 +14,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+type Controller struct {
+	bot *models.Bot
+}
+
+func NewController(bot *models.Bot) *Controller {
+	return &Controller{bot: bot}
+}
+
 var (
-	bot               *tgbotapi.BotAPI
-	activeSmoke       bool
-	mu                sync.Mutex
-	smokeStarter      int64
-	smokeMessageID    int64
-	joinedUsers       []string
-	originalSmokeText string
-	allowedChats      = map[int64]bool{
+	mu           sync.Mutex
+	allowedChats = map[int64]bool{
 		-4845216092: true,
 	}
 )
-
-func main() {
-	config := config.DefaultConfig()
-
-	err := logger.Init(config.LogFile)
-	if err != nil {
-		log.Fatalf("Не удалось инициализировать логгер: %v", err)
-	}
-	defer logger.Close()
-
-	// Инициализация базы данных
-	db, err := database.InitSQLite(config.DBPath)
-	if err != nil {
-		logger.Fatal("Ошибка инициализации БД", err)
-	}
-	defer db.Close()
-
-	repo := repository.NewSQLiteRepository(db.GetDB())
-
-	//var err error
-	bot, err = tgbotapi.NewBotAPI("8304451768:AAEyfAUAWL2jNgDQI-MfKVHObe71BBtAJ98")
-	if err != nil {
-		log.Panic(err)
-	}
-
-	bot.Debug = true
-	log.Printf("Authorized on account %s", bot.Self.UserName)
-	setCommands()
-
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-
-	updates := bot.GetUpdatesChan(u)
-
-	for update := range updates {
-		if update.CallbackQuery != nil {
-			if isChatAllowed(update.CallbackQuery.Message.Chat.ID) {
-				handleCallback(update.CallbackQuery)
-			}
-			continue
-		}
-
-		if update.Message == nil {
-			continue
-		}
-
-		if !isChatAllowed(update.Message.Chat.ID) {
-			continue
-		}
-
-		if isOldMessage(update.Message) {
-			log.Printf("Пропускаем старое сообщение от %s: %s",
-				update.Message.From.UserName, update.Message.Text)
-			continue
-		}
-
-		// Работает только в групповых чатах
-		if !update.Message.Chat.IsGroup() && !update.Message.Chat.IsSuperGroup() {
-			continue
-		}
-
-		//if update.Message.IsCommand() {
-		switch update.Message.Command() {
-		case "start":
-			handleConsent(update.Message, repo)
-		case "smoke":
-			handleSmoke(update.Message, repo)
-		case "cancel":
-			handleEndSmoke(update.Message)
-		case "help":
-			sendMessage(update.Message.Chat.ID,
-				"Поддерживаемые команды:\n\n"+
-					"/start - Присоединиться к банде курителей\n"+
-					"/smoke - Предложить всем перекур\n"+
-					"/cancel - Отменить активный перекур\n"+
-					"/help - Помощь")
-			//case "yes", "no":
-			//	handleResponse(update.Message)
-			//default:
-			//	sendMessage(update.Message.Chat.ID, fmt.Sprintf("@%s, твоя команда не поддерживается, прожми /help", update.Message.From.UserName))
-		}
-		//} else {
-		//	sendMessage(update.Message.Chat.ID, fmt.Sprintf("@%s, бот принимает только команды", update.Message.From.UserName))
-		//}
-
-	}
-}
 
 func isOldMessage(message *tgbotapi.Message) bool {
 	messageTime := time.Unix(int64(message.Date), 0)
@@ -127,38 +41,44 @@ func isChatAllowed(chatID int64) bool {
 	return exists
 }
 
-func handleConsent(message *tgbotapi.Message, repo *repository.SQLiteRepository) {
-	user, err := repo.GetByID(message.From.ID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-
-		}
-		logger.Error("Ошибка нахождения пользователя", err)
+func (c Controller) handleConsent(message *tgbotapi.Message, repo *repository.SQLiteRepository) {
+	_, err := repo.GetByID(message.From.ID)
+	if err != sql.ErrNoRows {
+		logger.Error("Пользователь уже существует", err)
+		answer := fmt.Sprintf("❌ Пользоватль @%s уже в базе", message.From.UserName)
+		c.sendMessage(message.Chat.ID, answer)
 		return
 	}
 
-	err := repo.SaveUser(message.From.ID, message.From.UserName, message.Chat.ID)
+	err = repo.SaveUser(message.From.ID, message.From.UserName, message.Chat.ID)
 	if err != nil {
 		logger.Error("Ошибка сохранения пользователя", err)
 		return
 	}
 	answer := fmt.Sprintf("✅ @%s теперь с нами!", message.From.UserName)
-	sendMessage(message.Chat.ID, answer)
+	c.sendMessage(message.Chat.ID, answer)
 }
 
-func handleSmoke(message *tgbotapi.Message, repo *repository.SQLiteRepository) {
+func (c Controller) handleSmoke(message *tgbotapi.Message, repo *repository.SQLiteRepository) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if activeSmoke {
+	if c.bot.Chats[message.Chat.ID].ActiveSmoke {
 		answer := fmt.Sprintf("❌ @%s, уже кто-то предложил перекур!", message.From.UserName)
-		sendMessage(message.Chat.ID, answer)
+		c.sendMessage(message.Chat.ID, answer)
 		return
 	}
 
-	activeSmoke = true
-	smokeStarter = message.From.ID
-	//joinedUsers = []string{}
+	_, err := repo.GetByID(message.From.ID)
+	if err == sql.ErrNoRows {
+		logger.Info("Попытка создания перекура незарегистрированным пользователем")
+		answer := fmt.Sprintf("❌ @%s, для предложения перекура вам неободимо пустить по вене", message.From.UserName)
+		c.sendMessage(message.Chat.ID, answer)
+		return
+	}
+
+	c.bot.Chats[message.Chat.ID].ActiveSmoke = true
+	c.bot.Chats[message.Chat.ID].SmokeSession.SmokeStarter = message.From.ID
 
 	// Пользователи, давшие согласие
 	var users []string
@@ -174,15 +94,15 @@ func handleSmoke(message *tgbotapi.Message, repo *repository.SQLiteRepository) {
 	}
 
 	if len(users) == 0 {
-		sendMessage(message.Chat.ID, "❌ Пока никто не добавился ;(")
-		activeSmoke = false
+		c.sendMessage(message.Chat.ID, "❌ Пока никто не добавился ;(")
+		c.bot.Chats[message.Chat.ID].ActiveSmoke = false
 		return
 	}
 
-	originalSmokeText = fmt.Sprintf("🚬 @%s предлагает перекур! \nПриглашённые джентльмены: %s",
+	c.bot.Chats[message.Chat.ID].SmokeSession.OriginalSmokeText = fmt.Sprintf("🚬 @%s предлагает перекур! \nПриглашённые джентльмены: %s",
 		message.From.UserName, getUsers(users))
 
-	msg := tgbotapi.NewMessage(message.Chat.ID, originalSmokeText)
+	msg := tgbotapi.NewMessage(message.Chat.ID, c.bot.Chats[message.Chat.ID].SmokeSession.OriginalSmokeText)
 
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -190,55 +110,70 @@ func handleSmoke(message *tgbotapi.Message, repo *repository.SQLiteRepository) {
 			tgbotapi.NewInlineKeyboardButtonData("❌ Нет", "no"),
 		),
 	)
-	sentMsg, err := bot.Send(msg)
+	sentMsg, err := c.bot.Bot.Send(msg)
 	if err != nil {
 		log.Printf("Ошибка отправки сообщения с кнопками: %v", err)
-		activeSmoke = false
+		c.bot.Chats[message.Chat.ID].ActiveSmoke = false
 		return
 	}
-	smokeMessageID = int64(sentMsg.MessageID)
+	c.bot.Chats[message.Chat.ID].SmokeSession.SmokeMessageID = int64(sentMsg.MessageID)
 	//sendMessage(message.Chat.ID, msg.Text)
 }
 
-func handleCallback(callback *tgbotapi.CallbackQuery) {
+func (c Controller) handleCallback(callback *tgbotapi.CallbackQuery) {
 	callbackConfig := tgbotapi.NewCallback(callback.ID, "")
-	bot.Send(callbackConfig)
+	c.bot.Bot.Send(callbackConfig)
 
 	if callback.Data == "yes" || callback.Data == "no" {
-		handleButtonResponse(callback)
+		c.handleButtonResponse(callback)
 	}
 }
 
-func handleButtonResponse(callback *tgbotapi.CallbackQuery) {
+func (c Controller) handleButtonResponse(callback *tgbotapi.CallbackQuery) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if !activeSmoke {
+	chatId := callback.Message.Chat.ID
+
+	if !c.bot.Chats[chatId].ActiveSmoke {
 		return
 	}
 
 	if callback.Data == "yes" {
 		userName := fmt.Sprintf("@%s", callback.From.UserName)
 
-		for _, user := range joinedUsers {
+		for _, user := range c.bot.Chats[chatId].SmokeSession.JoinedUsers {
 			if user == userName {
 				return
 			}
 		}
-		joinedUsers = append(joinedUsers, userName)
+		c.bot.Chats[chatId].SmokeSession.JoinedUsers = append(c.bot.Chats[chatId].SmokeSession.JoinedUsers, userName)
 
 		// Редактируем сообщение с обновленным списком
-		editMessage(callback.Message.Chat.ID, smokeMessageID)
+		c.editMessage(callback.Message.Chat.ID, c.bot.Chats[chatId].SmokeSession.SmokeMessageID)
+	} else if callback.Data == "no" {
+		userName := fmt.Sprintf("@%s", callback.From.UserName)
+
+		joinedUsers2 := make([]string, 0)
+		for _, user := range c.bot.Chats[chatId].SmokeSession.JoinedUsers {
+			if user == userName {
+				continue
+			}
+			joinedUsers2 = append(joinedUsers2, user)
+		}
+		c.bot.Chats[chatId].SmokeSession.JoinedUsers = joinedUsers2
+
+		c.editMessage(callback.Message.Chat.ID, c.bot.Chats[chatId].SmokeSession.SmokeMessageID)
 	}
-	// Для "no" ничего не делаем
 }
 
-func editMessage(chatID int64, messageID int64) {
+func (c Controller) editMessage(chatID int64, messageID int64) {
 	newText := fmt.Sprintf("%s\n\nПрисоединились: %s",
-		originalSmokeText,
-		getUsers(joinedUsers))
+		c.bot.Chats[chatID].SmokeSession.OriginalSmokeText,
+		getUsers(c.bot.Chats[chatID].SmokeSession.JoinedUsers),
+	)
 
-	if len(joinedUsers) == 0 {
+	if len(c.bot.Chats[chatID].SmokeSession.JoinedUsers) == 0 {
 		newText += "пока никто"
 	}
 
@@ -252,26 +187,44 @@ func editMessage(chatID int64, messageID int64) {
 			},
 		},
 	}
-	bot.Send(edit)
+	c.bot.Bot.Send(edit)
 }
 
-func handleEndSmoke(message *tgbotapi.Message) {
+func (c Controller) handleEndSmoke(message *tgbotapi.Message) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if activeSmoke && message.From.ID == smokeStarter {
-		activeSmoke = false
+	if c.bot.Chats[message.Chat.ID].ActiveSmoke && message.From.ID == c.bot.Chats[message.Chat.ID].SmokeSession.SmokeStarter {
+		c.bot.Chats[message.Chat.ID].ActiveSmoke = false
 		answer := fmt.Sprintf("@%s завершил перекур!", message.From.UserName)
-		sendMessage(message.Chat.ID, answer)
+		c.sendMessage(message.Chat.ID, answer)
 
-		deleteMsg := tgbotapi.NewDeleteMessage(message.Chat.ID, int(smokeMessageID))
-		bot.Send(deleteMsg)
-	} else if activeSmoke {
+		deleteMsg := tgbotapi.NewDeleteMessage(message.Chat.ID, int(c.bot.Chats[message.Chat.ID].SmokeSession.SmokeMessageID))
+		c.bot.Bot.Send(deleteMsg)
+	} else if c.bot.Chats[message.Chat.ID].ActiveSmoke {
 		answer := fmt.Sprintf("@%s, у тебя нет прав!", message.From.UserName)
-		sendMessage(message.Chat.ID, answer)
+		c.sendMessage(message.Chat.ID, answer)
 	} else {
-		sendMessage(message.Chat.ID, "Нет активного перекура!")
+		c.sendMessage(message.Chat.ID, "Нет активного перекура!")
 	}
+}
+
+func (c Controller) handleDeleteUser(message *tgbotapi.Message, repo *repository.SQLiteRepository) {
+	_, err := repo.GetByID(message.From.ID)
+	if err == sql.ErrNoRows {
+		logger.Info("Пользователя нет в базе")
+		answer := fmt.Sprintf("❌ @%s, вас не существует", message.From.UserName)
+		c.sendMessage(message.Chat.ID, answer)
+		return
+	}
+
+	err = repo.DeleteByID(message.From.ID)
+	if err != nil {
+		logger.Error("Ошибка удаления пользователя из БД", err)
+		return
+	}
+	answer := fmt.Sprintf("✅ @%s уволен!", message.From.UserName)
+	c.sendMessage(message.Chat.ID, answer)
 }
 
 func getUsers(users []string) string {
@@ -285,13 +238,13 @@ func getUsers(users []string) string {
 	return result
 }
 
-func sendMessage(chatID int64, text string) {
+func (c Controller) sendMessage(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	bot.Send(msg)
+	c.bot.Bot.Send(msg)
 }
 
 // Регистрация команд бота
-func setCommands() {
+func (c Controller) SetCommands() {
 	commands := []tgbotapi.BotCommand{
 		{
 			Command:     "start",
@@ -310,6 +263,10 @@ func setCommands() {
 			Description: "Отменить перекур",
 		},
 		{
+			Command:     "delete",
+			Description: "Удалиться из базы",
+		},
+		{
 			Command:     "help",
 			Description: "Помощь",
 		},
@@ -320,7 +277,7 @@ func setCommands() {
 	}
 
 	config := tgbotapi.NewSetMyCommands(commands...)
-	bot.Request(config)
+	c.bot.Bot.Request(config)
 	//_, err := bot.Request(config)
 	//return err
 }
