@@ -25,7 +25,8 @@ func NewController(bot *models.Bot) *Controller {
 var (
 	mu           sync.Mutex
 	allowedChats = map[int64]bool{
-		-4845216092: true,
+		-4845216092:    true,
+		-1002652733052: true,
 	}
 )
 
